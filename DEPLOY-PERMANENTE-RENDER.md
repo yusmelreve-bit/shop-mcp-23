@@ -27,7 +27,7 @@ En el servicio Web, define:
 - `DATABASE_URL`: `file:/var/data/dev.sqlite`
 - `NODE_ENV`: `production`
 - `HOST`: `0.0.0.0`
-- `SCOPES`: vacio por ahora
+- `SCOPES`: `write_products,read_products,write_metaobjects,read_metaobjects,write_metaobject_definitions,read_metaobject_definitions`
 
 ## 4) Deploy en Render
 
