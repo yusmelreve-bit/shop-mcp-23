@@ -2,7 +2,7 @@
 
 client_id = "8c06c1772b384c7173ae092a5da9fad3"
 name = "Shop-MCP"
-application_url = "https://font-marc-encoding-manufacture.trycloudflare.com"
+application_url = "https://shop-mcp-23.onrender.com"
 embedded = true
 
 [webhooks]
@@ -23,7 +23,6 @@ optional_scopes = [ ]
 use_legacy_install_flow = false
 
 [auth]
-redirect_urls = [ "https://font-marc-encoding-manufacture.trycloudflare.com/auth/callback", "https://font-marc-encoding-manufacture.trycloudflare.com/auth/shopify/callback", "https://font-marc-encoding-manufacture.trycloudflare.com/api/auth/callback" ]
-
+redirect_urls = [ "https://shop-mcp-23.onrender.com/auth/callback", "https://shop-mcp-23.onrender.com/auth/shopify/callback", "https://shop-mcp-23.onrender.com/api/auth/callback" ]
 [build]
 automatically_update_urls_on_dev = true
