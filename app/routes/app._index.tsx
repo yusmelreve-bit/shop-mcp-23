@@ -9,6 +9,22 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
+const DEFAULT_COLLECTION_HANDLES = ["frontpage", "all-equipment"];
+
+function getGraphQLErrorMessage(payload: any, fallback: string) {
+  return (
+    payload?.errors?.[0]?.message ||
+    payload?.data?.productCreate?.userErrors?.[0]?.message ||
+    fallback
+  );
+}
+
+function collectUserErrorMessages(userErrors: Array<{ message?: string }> = []) {
+  return userErrors
+    .map((err) => err?.message)
+    .filter((msg): msg is string => Boolean(msg));
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
 
@@ -21,6 +37,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     Math.floor(Math.random() * 4)
   ];
   try {
+    const warnings: string[] = [];
+    const collectionsAdded: string[] = [];
+    let publicationName: string | null = null;
+
     const response = await admin.graphql(
       `#graphql
         mutation populateProduct($product: ProductCreateInput!) {
@@ -51,6 +71,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         variables: {
           product: {
             title: `${color} Snowboard`,
+            status: "ACTIVE",
           },
         },
       },
@@ -64,16 +85,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       productCreate?.userErrors?.length ||
       !productCreate?.product
     ) {
-      const message =
-        responseJson?.errors?.[0]?.message ||
-        productCreate?.userErrors?.[0]?.message ||
-        "No se pudo crear el producto";
+      const message = getGraphQLErrorMessage(
+        responseJson,
+        "No se pudo crear el producto",
+      );
 
       return {
         error: message,
         product: null,
         variant: null,
         metaobject: null,
+        automation: null,
       };
     }
 
@@ -111,6 +133,139 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       if (!variantResponseJson?.errors?.length && !variantUpdate?.userErrors?.length) {
         variant = variantUpdate?.productVariants ?? null;
+      } else {
+        const variantErrors = [
+          ...(variantResponseJson?.errors || []).map((err: any) => err?.message),
+          ...collectUserErrorMessages(variantUpdate?.userErrors || []),
+        ].filter(Boolean);
+
+        if (variantErrors.length) {
+          warnings.push(`Variant update: ${variantErrors.join(" | ")}`);
+        }
+      }
+    }
+
+    try {
+      const publicationsResponse = await admin.graphql(
+        `#graphql
+          query getPublications {
+            publications(first: 20) {
+              nodes {
+                id
+                name
+              }
+            }
+          }`,
+      );
+      const publicationsJson = await publicationsResponse.json();
+      const publicationNodes = publicationsJson?.data?.publications?.nodes || [];
+      const onlineStorePublication = publicationNodes.find((pub: any) =>
+        /(online store|tienda online)/i.test(pub?.name || ""),
+      );
+
+      if (onlineStorePublication?.id) {
+        publicationName = onlineStorePublication?.name || null;
+        const publishResponse = await admin.graphql(
+          `#graphql
+            mutation publishToOnlineStore($id: ID!, $publicationId: ID!) {
+              publishablePublish(
+                id: $id
+                input: [{ publicationId: $publicationId }]
+              ) {
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }`,
+          {
+            variables: {
+              id: product.id,
+              publicationId: onlineStorePublication.id,
+            },
+          },
+        );
+        const publishJson = await publishResponse.json();
+        const publishErrors = [
+          ...(publishJson?.errors || []).map((err: any) => err?.message),
+          ...collectUserErrorMessages(
+            publishJson?.data?.publishablePublish?.userErrors || [],
+          ),
+        ].filter(Boolean);
+
+        if (publishErrors.length) {
+          warnings.push(`Publication: ${publishErrors.join(" | ")}`);
+        }
+      } else {
+        warnings.push(
+          "No se encontro la publicacion de Tienda online para publicacion automatica.",
+        );
+      }
+    } catch (error) {
+      warnings.push("No se pudo ejecutar la publicacion automatica.");
+      console.error("Auto publication failed", error);
+    }
+
+    for (const handle of DEFAULT_COLLECTION_HANDLES) {
+      try {
+        const collectionResponse = await admin.graphql(
+          `#graphql
+            query getCollectionByHandle($query: String!) {
+              collections(first: 1, query: $query) {
+                nodes {
+                  id
+                  handle
+                }
+              }
+            }`,
+          { variables: { query: `handle:${handle}` } },
+        );
+        const collectionJson = await collectionResponse.json();
+        const collection = collectionJson?.data?.collections?.nodes?.[0];
+
+        if (!collection?.id) {
+          warnings.push(`No se encontro la coleccion: ${handle}`);
+          continue;
+        }
+
+        const addToCollectionResponse = await admin.graphql(
+          `#graphql
+            mutation addProductToCollection($id: ID!, $productIds: [ID!]!) {
+              collectionAddProducts(id: $id, productIds: $productIds) {
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }`,
+          {
+            variables: {
+              id: collection.id,
+              productIds: [product.id],
+            },
+          },
+        );
+        const addJson = await addToCollectionResponse.json();
+        const addErrors = [
+          ...(addJson?.errors || []).map((err: any) => err?.message),
+          ...collectUserErrorMessages(
+            addJson?.data?.collectionAddProducts?.userErrors || [],
+          ),
+        ].filter(Boolean);
+
+        if (addErrors.length) {
+          const nonDuplicateErrors = addErrors.filter(
+            (msg) => !/already exists|ya existe/i.test(msg),
+          );
+          if (nonDuplicateErrors.length) {
+            warnings.push(`Collection ${handle}: ${nonDuplicateErrors.join(" | ")}`);
+          }
+        } else {
+          collectionsAdded.push(handle);
+        }
+      } catch (error) {
+        warnings.push(`No se pudo agregar a coleccion ${handle}.`);
+        console.error(`Collection assignment failed for ${handle}`, error);
       }
     }
 
@@ -119,6 +274,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       product,
       variant,
       metaobject: null,
+      automation: {
+        publicationName,
+        collectionsAdded,
+        warnings,
+      },
     };
   } catch (error) {
     console.error("Generate product failed", error);
@@ -127,6 +287,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       product: null,
       variant: null,
       metaobject: null,
+      automation: null,
     };
   }
 };
@@ -141,12 +302,16 @@ export default function Index() {
 
   useEffect(() => {
     if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
+      if (fetcher.data?.automation?.warnings?.length) {
+        shopify.toast.show("Producto creado con avisos. Revisa el resultado JSON.");
+      } else {
+        shopify.toast.show("Producto creado y publicado automaticamente");
+      }
     }
     if (fetcher.data?.error) {
       shopify.toast.show(fetcher.data.error);
     }
-  }, [fetcher.data?.product?.id, shopify]);
+  }, [fetcher.data?.product?.id, fetcher.data?.error, fetcher.data?.automation?.warnings?.length, shopify]);
 
   const generateProduct = () => fetcher.submit({}, { method: "POST" });
 
@@ -279,6 +444,24 @@ export default function Index() {
                   <code>
                     {JSON.stringify(fetcher.data.metaobject, null, 2)}
                   </code>
+                </pre>
+              </s-box>
+
+              <s-heading>automation result</s-heading>
+              <s-box
+                padding="base"
+                borderWidth="base"
+                borderRadius="base"
+                background="subdued"
+              >
+                <pre
+                  style={{
+                    margin: 0,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  <code>{JSON.stringify(fetcher.data.automation, null, 2)}</code>
                 </pre>
               </s-box>
             </s-stack>
